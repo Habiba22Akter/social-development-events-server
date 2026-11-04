@@ -50,8 +50,11 @@ GitHub works the same way with `/api/auth/callback/github`; add `github` to
 - `ALL /api/auth/*` — BetterAuth handler (sign up, sign in, session, OAuth…)
 - `GET /api/events?limit=6` — upcoming events (public, sorted by date)
 - `GET /api/events/joined` — events the signed-in user joined (session required, sorted by date)
+- `GET /api/events/mine` — events the signed-in user created (session required, sorted by date)
 - `GET /api/events/:id` — one upcoming event (public, includes `joinedByViewer`)
 - `POST /api/events` — create an event (session required)
+- `PATCH /api/events/:id` — update an event (session required, organiser only)
+- `DELETE /api/events/:id` — delete an event (session required, organiser only)
 - `POST /api/events/:id/join` — join an event (session required, idempotent)
 
 ## Password rule

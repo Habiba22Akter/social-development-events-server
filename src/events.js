@@ -150,6 +150,65 @@ function serializeEvent(event, viewerId) {
   };
 }
 
+/**
+ * Shared validation for creating and updating an event. Returns either
+ * `{ error }` (a message safe to show the user) or `{ values }` with the
+ * normalised fields that can be written to MongoDB.
+ *
+ * Pass the stored event as `existing` when updating: a field the organiser did
+ * not change keeps its stored value, so an old event with a thumbnail that no
+ * longer loads can still be edited.
+ */
+async function parseEventInput(body = {}, { existing = null } = {}) {
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const description =
+    typeof body.description === "string" ? body.description.trim() : "";
+  const type = typeof body.type === "string" ? body.type.trim() : "";
+  const location = typeof body.location === "string" ? body.location.trim() : "";
+  const date = new Date(body.date);
+  const { url: imageUrl, error: imageError } = normalizeImageUrl(body.image);
+
+  if (!title) return { error: "Event title is required." };
+  if (title.length > 100) {
+    return { error: "Event title must be 100 characters or fewer." };
+  }
+  if (!description) return { error: "Description is required." };
+  if (description.length > 500) {
+    return { error: "Description must be 500 characters or fewer." };
+  }
+  if (!EVENT_TYPES.includes(type)) {
+    return { error: "Choose a valid event type." };
+  }
+  if (!location) return { error: "Meeting point is required." };
+  if (location.length > 160) {
+    return { error: "Meeting point must be 160 characters or fewer." };
+  }
+  if (imageError) return { error: imageError };
+  if (!imageUrl) return { error: "Thumbnail image URL is required." };
+  if (Number.isNaN(date.getTime())) {
+    return { error: "Enter a valid event date and time." };
+  }
+
+  const dateUnchanged =
+    Boolean(existing?.date) &&
+    date.getTime() === new Date(existing.date).getTime();
+
+  if (!dateUnchanged && date <= new Date()) {
+    return { error: "Choose a future date and time for your event." };
+  }
+
+  const imageUnchanged = Boolean(existing?.image) && imageUrl === existing.image;
+
+  if (!imageUnchanged && !(await isLoadableImageUrl(imageUrl))) {
+    return {
+      error:
+        "That thumbnail URL does not load as an image. Paste a direct image link (for example https://example.com/photo.jpg) or a shared Google Drive link.",
+    };
+  }
+
+  return { values: { title, description, type, location, date, image: imageUrl } };
+}
+
 export const eventsRouter = express.Router();
 
 /* -------------------------------------------------------------------------- */
@@ -195,72 +254,14 @@ eventsRouter.post("/", async (req, res, next) => {
         .json({ message: "You must be signed in to create an event." });
     }
 
-    const body = req.body || {};
-    const title = typeof body.title === "string" ? body.title.trim() : "";
-    const description =
-      typeof body.description === "string" ? body.description.trim() : "";
-    const type = typeof body.type === "string" ? body.type.trim() : "";
-    const location = typeof body.location === "string" ? body.location.trim() : "";
-    const date = new Date(body.date);
-    const { url: imageUrl, error: imageError } = normalizeImageUrl(body.image);
+    const parsed = await parseEventInput(req.body || {});
 
-    if (!title) {
-      return res.status(400).json({ message: "Event title is required." });
-    }
-    if (title.length > 100) {
-      return res
-        .status(400)
-        .json({ message: "Event title must be 100 characters or fewer." });
-    }
-    if (!description) {
-      return res.status(400).json({ message: "Description is required." });
-    }
-    if (description.length > 500) {
-      return res
-        .status(400)
-        .json({ message: "Description must be 500 characters or fewer." });
-    }
-    if (!EVENT_TYPES.includes(type)) {
-      return res.status(400).json({ message: "Choose a valid event type." });
-    }
-    if (!location) {
-      return res.status(400).json({ message: "Meeting point is required." });
-    }
-    if (location.length > 160) {
-      return res
-        .status(400)
-        .json({ message: "Meeting point must be 160 characters or fewer." });
-    }
-    if (imageError) {
-      return res.status(400).json({ message: imageError });
-    }
-    if (!imageUrl) {
-      return res.status(400).json({ message: "Thumbnail image URL is required." });
-    }
-    if (Number.isNaN(date.getTime())) {
-      return res
-        .status(400)
-        .json({ message: "Enter a valid event date and time." });
-    }
-    if (date <= new Date()) {
-      return res
-        .status(400)
-        .json({ message: "Choose a future date and time for your event." });
-    }
-    if (!(await isLoadableImageUrl(imageUrl))) {
-      return res.status(400).json({
-        message:
-          "That thumbnail URL does not load as an image. Paste a direct image link (for example https://example.com/photo.jpg) or a shared Google Drive link.",
-      });
+    if (parsed.error) {
+      return res.status(400).json({ message: parsed.error });
     }
 
     const event = {
-      title,
-      description,
-      type,
-      location,
-      date,
-      image: imageUrl,
+      ...parsed.values,
       organizerId: user.id,
       organizerEmail: user.email,
       createdAt: new Date(),
@@ -272,6 +273,44 @@ eventsRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json({
       event: serializeEvent({ ...event, _id: result.insertedId }, user.id),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  GET /api/events/mine — protected, events this user created                */
+/* -------------------------------------------------------------------------- */
+
+// Declared before "/:id" so Express does not treat "mine" as an id.
+eventsRouter.get("/mine", async (req, res, next) => {
+  try {
+    const user = await getSessionUser(req);
+
+    if (!user) {
+      return res
+        .status(401)
+        .json({ message: "Log in to manage the events you created." });
+    }
+
+    const now = new Date();
+    const database = await connectToDatabase();
+
+    const events = await database
+      .collection("events")
+      .aggregate([
+        { $match: { organizerId: user.id } },
+        { $addFields: { isPast: { $lt: ["$date", now] } } },
+        { $sort: { isPast: 1, date: 1 } },
+      ])
+      .toArray();
+
+    return res.json({
+      events: events.map((event) => ({
+        ...serializeEvent(event, user.id),
+        isPast: event.isPast,
+      })),
     });
   } catch (error) {
     next(error);
@@ -414,6 +453,110 @@ eventsRouter.post("/:id/join", async (req, res, next) => {
       alreadyJoined: true,
       participantCount: existing.participants?.length || 0,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  PATCH /api/events/:id — protected, organiser only                         */
+/* -------------------------------------------------------------------------- */
+
+eventsRouter.patch("/:id", async (req, res, next) => {
+  try {
+    const user = await getSessionUser(req);
+
+    if (!user) {
+      return res.status(401).json({ message: "Log in to update this event." });
+    }
+
+    if (!OBJECT_ID.test(req.params.id)) {
+      return res.status(404).json({ message: "Event not found." });
+    }
+
+    const database = await connectToDatabase();
+    const events = database.collection("events");
+    const eventId = new ObjectId(req.params.id);
+    const existing = await events.findOne(
+      { _id: eventId },
+      { projection: { organizerId: 1, image: 1, date: 1 } },
+    );
+
+    if (!existing) {
+      return res.status(404).json({ message: "Event not found." });
+    }
+
+    if (existing.organizerId !== user.id) {
+      return res
+        .status(403)
+        .json({ message: "You can only update events you created." });
+    }
+
+    const parsed = await parseEventInput(req.body || {}, { existing });
+
+    if (parsed.error) {
+      return res.status(400).json({ message: parsed.error });
+    }
+
+    const updated = await events.findOneAndUpdate(
+      { _id: eventId, organizerId: user.id },
+      { $set: { ...parsed.values, updatedAt: new Date() } },
+      { returnDocument: "after" },
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: "Event not found." });
+    }
+
+    return res.json({
+      message: "Event updated.",
+      event: {
+        ...serializeEvent(updated, user.id),
+        isPast: updated.date < new Date(),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/*  DELETE /api/events/:id — protected, organiser only                        */
+/* -------------------------------------------------------------------------- */
+
+eventsRouter.delete("/:id", async (req, res, next) => {
+  try {
+    const user = await getSessionUser(req);
+
+    if (!user) {
+      return res.status(401).json({ message: "Log in to delete this event." });
+    }
+
+    if (!OBJECT_ID.test(req.params.id)) {
+      return res.status(404).json({ message: "Event not found." });
+    }
+
+    const database = await connectToDatabase();
+    const events = database.collection("events");
+    const eventId = new ObjectId(req.params.id);
+    const existing = await events.findOne(
+      { _id: eventId },
+      { projection: { organizerId: 1 } },
+    );
+
+    if (!existing) {
+      return res.status(404).json({ message: "Event not found." });
+    }
+
+    if (existing.organizerId !== user.id) {
+      return res
+        .status(403)
+        .json({ message: "You can only delete events you created." });
+    }
+
+    await events.deleteOne({ _id: eventId, organizerId: user.id });
+
+    return res.json({ message: "Event deleted.", deletedId: req.params.id });
   } catch (error) {
     next(error);
   }
