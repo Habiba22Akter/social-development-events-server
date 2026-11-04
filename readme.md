@@ -57,6 +57,14 @@ GitHub works the same way with `/api/auth/callback/github`; add `github` to
 - `DELETE /api/events/:id` — delete an event (session required, organiser only)
 - `POST /api/events/:id/join` — join an event (session required, idempotent)
 
+## Thumbnails
+
+`image` accepts a direct image URL, a Google Drive share link, or a normal web
+page URL. For a page, the server reads its `og:image` / `twitter:image` preview
+and stores that as the thumbnail. If a page has no usable preview image (some
+sites serve a bot-protection shell), the event is still saved with the default
+community photo and the response includes a `notice` explaining that.
+
 ## Password rule
 
 At least 6 characters with one uppercase and one lowercase letter. It is

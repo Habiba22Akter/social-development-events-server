@@ -31,6 +31,13 @@ const DRIVE_FILE_ID = /^[A-Za-z0-9_-]{10,}$/;
 const PRIVATE_HOST =
   /^(localhost|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|\[::1\]|.*\.local|.*\.internal)$/i;
 
+/**
+ * Kept in sync with `EVENT_FALLBACK_IMAGE` in the Next.js app
+ * (src/lib/image-url.js). Used when a pasted link cannot produce an image.
+ */
+const DEFAULT_EVENT_IMAGE =
+  "https://images.pexels.com/photos/11319521/pexels-photo-11319521.jpeg?auto=compress&cs=tinysrgb&w=900";
+
 function getDriveFileId(url) {
   if (!DRIVE_HOSTS.has(url.hostname)) return "";
 
@@ -80,17 +87,53 @@ function normalizeImageUrl(value) {
   return { url: parsed.toString(), error: "" };
 }
 
-async function isLoadableImageUrl(value) {
+/**
+ * Social preview images declared by a web page, in the order we prefer them.
+ * Both attribute orders are covered because real pages use both.
+ */
+const PREVIEW_IMAGE_META = [
+  /<meta[^>]+(?:property|name)=["']og:image(?::url)?["'][^>]*?content=["']([^"']+)["']/i,
+  /<meta[^>]+content=["']([^"']+)["'][^>]*?(?:property|name)=["']og:image(?::url)?["']/i,
+  /<meta[^>]+(?:property|name)=["']twitter:image(?::src)?["'][^>]*?content=["']([^"']+)["']/i,
+  /<meta[^>]+content=["']([^"']+)["'][^>]*?(?:property|name)=["']twitter:image(?::src)?["']/i,
+];
+
+function findPreviewImage(html, pageUrl) {
+  for (const pattern of PREVIEW_IMAGE_META) {
+    const match = html.match(pattern);
+
+    if (!match) continue;
+
+    try {
+      const candidate = new URL(
+        match[1].replace(/&amp;/g, "&").trim(),
+        pageUrl,
+      );
+
+      if (candidate.protocol === "https:") return candidate.toString();
+    } catch {
+      // Try the next pattern.
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Checks that a URL really serves an image. Returns an empty string when it
+ * does, otherwise a message that explains what went wrong.
+ */
+async function checkImageUrl(value) {
   let url;
 
   try {
     url = new URL(value);
   } catch {
-    return false;
+    return "Enter a complete image URL, for example https://example.com/photo.jpg";
   }
 
   if (url.protocol !== "https:" || PRIVATE_HOST.test(url.hostname)) {
-    return false;
+    return "Use a public HTTPS image URL.";
   }
 
   try {
@@ -107,10 +150,105 @@ async function isLoadableImageUrl(value) {
       await response.body.cancel().catch(() => {});
     }
 
-    return response.ok && contentType.startsWith("image/");
+    if (!response.ok) {
+      return `That image URL responded with ${response.status}. Check the link and try again.`;
+    }
+
+    return contentType.startsWith("image/") ? "" : "That URL does not return an image file.";
   } catch {
-    return false;
+    return "That thumbnail URL could not be reached. Check the link and try again.";
   }
+}
+
+/**
+ * Turns whatever the organiser pasted into a usable thumbnail URL.
+ *
+ * A direct image is used as-is. A normal web page (for example a restaurant or
+ * an event page) is accepted too: its `og:image` / `twitter:image` preview is
+ * extracted and stored instead, so pasting a page link still produces a real
+ * thumbnail.
+ */
+async function resolveThumbnail(value) {
+  let url;
+
+  try {
+    url = new URL(value);
+  } catch {
+    return {
+      error:
+        "Enter a complete image URL, for example https://example.com/photo.jpg",
+    };
+  }
+
+  if (url.protocol !== "https:" || PRIVATE_HOST.test(url.hostname)) {
+    return { error: "Use a public HTTPS image URL." };
+  }
+
+  let response;
+
+  try {
+    response = await fetch(url, {
+      redirect: "follow",
+      cache: "no-store",
+      headers: { Accept: "image/*,text/html" },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    return {
+      error: "That thumbnail URL could not be reached. Check the link and try again.",
+    };
+  }
+
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+
+  if (!response.ok) {
+    if (response.body) await response.body.cancel().catch(() => {});
+
+    return {
+      error: `That thumbnail URL responded with ${response.status}. Check the link and try again.`,
+    };
+  }
+
+  if (contentType.startsWith("image/")) {
+    if (response.body) await response.body.cancel().catch(() => {});
+
+    return { url: url.toString() };
+  }
+
+  if (contentType.startsWith("text/html")) {
+    // Enough of the page to find the <meta> tags; never the whole site.
+    const html = (await response.text()).slice(0, 400000);
+    const candidate = findPreviewImage(html, response.url || url.toString());
+
+    if (!candidate) {
+      // Pages behind bot protection often ship no metadata at all. Rather than
+      // blocking the organiser, keep the event and use the community photo.
+      return {
+        url: DEFAULT_EVENT_IMAGE,
+        warning:
+          "That link did not include a preview image, so a default community photo was used as the thumbnail.",
+      };
+    }
+
+    const problem = await checkImageUrl(candidate);
+
+    if (problem) {
+      return {
+        url: DEFAULT_EVENT_IMAGE,
+        warning:
+          "That page's preview image could not be used, so a default community photo was used as the thumbnail.",
+      };
+    }
+
+    return { url: candidate };
+  }
+
+  if (response.body) await response.body.cancel().catch(() => {});
+
+  return {
+    error:
+      "That URL does not return an image file. Paste a direct image link or a shared Google Drive file.",
+  };
 }
 
 async function getSessionUser(req) {
@@ -166,7 +304,7 @@ async function parseEventInput(body = {}, { existing = null } = {}) {
   const type = typeof body.type === "string" ? body.type.trim() : "";
   const location = typeof body.location === "string" ? body.location.trim() : "";
   const date = new Date(body.date);
-  const { url: imageUrl, error: imageError } = normalizeImageUrl(body.image);
+  const { url: normalizedImage, error: imageError } = normalizeImageUrl(body.image);
 
   if (!title) return { error: "Event title is required." };
   if (title.length > 100) {
@@ -184,7 +322,7 @@ async function parseEventInput(body = {}, { existing = null } = {}) {
     return { error: "Meeting point must be 160 characters or fewer." };
   }
   if (imageError) return { error: imageError };
-  if (!imageUrl) return { error: "Thumbnail image URL is required." };
+  if (!normalizedImage) return { error: "Thumbnail image URL is required." };
   if (Number.isNaN(date.getTime())) {
     return { error: "Enter a valid event date and time." };
   }
@@ -197,16 +335,28 @@ async function parseEventInput(body = {}, { existing = null } = {}) {
     return { error: "Choose a future date and time for your event." };
   }
 
-  const imageUnchanged = Boolean(existing?.image) && imageUrl === existing.image;
+  const imageUnchanged =
+    Boolean(existing?.image) && normalizedImage === existing.image;
+  let imageUrl = normalizedImage;
+  let warning = "";
 
-  if (!imageUnchanged && !(await isLoadableImageUrl(imageUrl))) {
-    return {
-      error:
-        "That thumbnail URL does not load as an image. Paste a direct image link (for example https://example.com/photo.jpg) or a shared Google Drive link.",
-    };
+  if (!imageUnchanged) {
+    // Accepts a direct image or a web page, in which case the page's own
+    // preview image is stored as the thumbnail.
+    const resolved = await resolveThumbnail(normalizedImage);
+
+    if (resolved.error) {
+      return { error: resolved.error };
+    }
+
+    imageUrl = resolved.url;
+    warning = resolved.warning || "";
   }
 
-  return { values: { title, description, type, location, date, image: imageUrl } };
+  return {
+    values: { title, description, type, location, date, image: imageUrl },
+    warning,
+  };
 }
 
 export const eventsRouter = express.Router();
@@ -273,6 +423,7 @@ eventsRouter.post("/", async (req, res, next) => {
 
     return res.status(201).json({
       event: serializeEvent({ ...event, _id: result.insertedId }, user.id),
+      ...(parsed.warning ? { notice: parsed.warning } : {}),
     });
   } catch (error) {
     next(error);
@@ -510,6 +661,7 @@ eventsRouter.patch("/:id", async (req, res, next) => {
 
     return res.json({
       message: "Event updated.",
+      ...(parsed.warning ? { notice: parsed.warning } : {}),
       event: {
         ...serializeEvent(updated, user.id),
         isPast: updated.date < new Date(),
