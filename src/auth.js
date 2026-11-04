@@ -1,6 +1,7 @@
 import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "@better-auth/mongo-adapter";
 import { APIError, createAuthMiddleware } from "better-auth/api";
+import { jwt } from "better-auth/plugins";
 
 import { appUrl, githubConfigured, googleConfigured, trustedOrigins } from "./config.js";
 import { db, mongoClient } from "./db.js";
@@ -83,6 +84,34 @@ export const auth = betterAuth({
   },
 
   trustedOrigins,
+
+  plugins: [
+    /**
+     * Issues short-lived JWTs (15 minutes) for the protected event API.
+     *
+     * The browser obtains one from `GET /api/auth/token` (or from the
+     * `set-auth-jwt` response header on `/get-session`), stores it in the
+     * `utsho.jwt` HTTP-only cookie, and sends it to the Express server as
+     * `Authorization: Bearer <token>`. The server verifies the signature
+     * against the public JWKS at `/api/auth/jwks` — no shared secret needed.
+     */
+    jwt({
+      jwks: {
+        keyPairConfig: { alg: "EdDSA", crv: "Ed25519" },
+      },
+      jwt: {
+        issuer: appUrl,
+        audience: appUrl,
+        expirationTime: "15m",
+        definePayload: ({ user }) => ({
+          id: user.id,
+          name: user.name || "",
+          email: user.email,
+          image: user.image || user.photoURL || "",
+        }),
+      },
+    }),
+  ],
 
   // The form validates this too; this keeps the API honest if someone posts
   // straight to /api/auth/sign-up/email.

@@ -1,9 +1,8 @@
 import express from "express";
 import { ObjectId } from "mongodb";
-import { fromNodeHeaders } from "better-auth/node";
 
-import { auth } from "./auth.js";
 import { connectToDatabase } from "./db.js";
+import { attachJwtUser } from "./jwt.js";
 
 /**
  * Keep this list in sync with the dropdown in the Next.js app
@@ -251,18 +250,6 @@ async function resolveThumbnail(value) {
   };
 }
 
-async function getSessionUser(req) {
-  try {
-    const session = await auth.api.getSession({
-      headers: fromNodeHeaders(req.headers),
-    });
-
-    return session?.user || null;
-  } catch {
-    return null;
-  }
-}
-
 function serializeEvent(event, viewerId) {
   const participants = event.participants || [];
 
@@ -274,6 +261,7 @@ function serializeEvent(event, viewerId) {
     location: event.location,
     date: event.date.toISOString(),
     image: event.image,
+    featured: Boolean(event.featured),
     createdAt: event.createdAt?.toISOString() ?? null,
     organizerId: event.organizerId,
     isOrganizer: Boolean(viewerId && event.organizerId === viewerId),
@@ -304,6 +292,13 @@ async function parseEventInput(body = {}, { existing = null } = {}) {
   const type = typeof body.type === "string" ? body.type.trim() : "";
   const location = typeof body.location === "string" ? body.location.trim() : "";
   const date = new Date(body.date);
+  // Checkbox values arrive as "on" from FormData and as booleans from JSON.
+  const featured =
+    body.featured === true ||
+    body.featured === "true" ||
+    body.featured === "on" ||
+    body.featured === 1 ||
+    body.featured === "1";
   const { url: normalizedImage, error: imageError } = normalizeImageUrl(body.image);
 
   if (!title) return { error: "Event title is required." };
@@ -354,12 +349,16 @@ async function parseEventInput(body = {}, { existing = null } = {}) {
   }
 
   return {
-    values: { title, description, type, location, date, image: imageUrl },
+    values: { title, description, type, location, date, image: imageUrl, featured },
     warning,
   };
 }
 
 export const eventsRouter = express.Router();
+
+// Every route below reads the optional JWT once. Public routes stay public;
+// protected routes require `req.user` (a verified token).
+eventsRouter.use(attachJwtUser);
 
 /* -------------------------------------------------------------------------- */
 /*  GET /api/events — public list of upcoming events                          */
@@ -367,7 +366,7 @@ export const eventsRouter = express.Router();
 
 eventsRouter.get("/", async (req, res, next) => {
   try {
-    const viewer = await getSessionUser(req);
+    const viewer = req.user;
     const requestedLimit = Number.parseInt(req.query.limit, 10);
     const limit =
       Number.isFinite(requestedLimit) && requestedLimit > 0
@@ -396,7 +395,7 @@ eventsRouter.get("/", async (req, res, next) => {
 
 eventsRouter.post("/", async (req, res, next) => {
   try {
-    const user = await getSessionUser(req);
+    const user = req.user;
 
     if (!user) {
       return res
@@ -437,7 +436,7 @@ eventsRouter.post("/", async (req, res, next) => {
 // Declared before "/:id" so Express does not treat "mine" as an id.
 eventsRouter.get("/mine", async (req, res, next) => {
   try {
-    const user = await getSessionUser(req);
+    const user = req.user;
 
     if (!user) {
       return res
@@ -475,7 +474,7 @@ eventsRouter.get("/mine", async (req, res, next) => {
 // Declared before "/:id" so Express does not treat "joined" as an id.
 eventsRouter.get("/joined", async (req, res, next) => {
   try {
-    const user = await getSessionUser(req);
+    const user = req.user;
 
     if (!user) {
       return res
@@ -509,6 +508,51 @@ eventsRouter.get("/joined", async (req, res, next) => {
 });
 
 /* -------------------------------------------------------------------------- */
+/*  GET /api/events/featured — public home-page highlights                    */
+/* -------------------------------------------------------------------------- */
+
+// Declared before "/:id" so Express does not treat "featured" as an id.
+eventsRouter.get("/featured", async (req, res, next) => {
+  try {
+    const viewer = req.user;
+    const requestedLimit = Number.parseInt(req.query.limit, 10);
+    const limit =
+      Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(requestedLimit, 12)
+        : 3;
+
+    const now = new Date();
+    const database = await connectToDatabase();
+    const events = database.collection("events");
+
+    // Organisers can curate the section with the `featured` flag. Until they
+    // do, the soonest upcoming drives fill in so the home page is never empty.
+    let highlighted = await events
+      .find({ date: { $gte: now }, featured: true })
+      .sort({ date: 1 })
+      .limit(limit)
+      .toArray();
+
+    const curated = highlighted.length > 0;
+
+    if (!curated) {
+      highlighted = await events
+        .find({ date: { $gte: now } })
+        .sort({ date: 1 })
+        .limit(limit)
+        .toArray();
+    }
+
+    return res.json({
+      curated,
+      events: highlighted.map((event) => serializeEvent(event, viewer?.id)),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /*  GET /api/events/:id — public event details                                */
 /* -------------------------------------------------------------------------- */
 
@@ -518,7 +562,7 @@ eventsRouter.get("/:id", async (req, res, next) => {
       return res.status(404).json({ message: "Event not found." });
     }
 
-    const viewer = await getSessionUser(req);
+    const viewer = req.user;
     const database = await connectToDatabase();
     const event = await database.collection("events").findOne({
       _id: new ObjectId(req.params.id),
@@ -541,7 +585,7 @@ eventsRouter.get("/:id", async (req, res, next) => {
 
 eventsRouter.post("/:id/join", async (req, res, next) => {
   try {
-    const user = await getSessionUser(req);
+    const user = req.user;
 
     if (!user) {
       return res.status(401).json({ message: "Log in to join this event." });
@@ -615,7 +659,7 @@ eventsRouter.post("/:id/join", async (req, res, next) => {
 
 eventsRouter.patch("/:id", async (req, res, next) => {
   try {
-    const user = await getSessionUser(req);
+    const user = req.user;
 
     if (!user) {
       return res.status(401).json({ message: "Log in to update this event." });
@@ -678,7 +722,7 @@ eventsRouter.patch("/:id", async (req, res, next) => {
 
 eventsRouter.delete("/:id", async (req, res, next) => {
   try {
-    const user = await getSessionUser(req);
+    const user = req.user;
 
     if (!user) {
       return res.status(401).json({ message: "Log in to delete this event." });
