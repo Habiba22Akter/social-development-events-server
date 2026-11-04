@@ -49,6 +49,7 @@ GitHub works the same way with `/api/auth/callback/github`; add `github` to
 - `GET /health` — database ping
 - `ALL /api/auth/*` — BetterAuth handler (sign up, sign in, session, OAuth…)
 - `GET /api/events?limit=6` — upcoming events (public, sorted by date)
+- `GET /api/events/joined` — events the signed-in user joined (session required, sorted by date)
 - `GET /api/events/:id` — one upcoming event (public, includes `joinedByViewer`)
 - `POST /api/events` — create an event (session required)
 - `POST /api/events/:id/join` — join an event (session required, idempotent)

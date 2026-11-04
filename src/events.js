@@ -279,6 +279,46 @@ eventsRouter.post("/", async (req, res, next) => {
 });
 
 /* -------------------------------------------------------------------------- */
+/*  GET /api/events/joined — protected, events this user joined              */
+/* -------------------------------------------------------------------------- */
+
+// Declared before "/:id" so Express does not treat "joined" as an id.
+eventsRouter.get("/joined", async (req, res, next) => {
+  try {
+    const user = await getSessionUser(req);
+
+    if (!user) {
+      return res
+        .status(401)
+        .json({ message: "Log in to see the events you joined." });
+    }
+
+    const now = new Date();
+    const database = await connectToDatabase();
+
+    // Upcoming drives first (soonest on top), then the ones that already
+    // happened. Each group is ordered by event date.
+    const events = await database
+      .collection("events")
+      .aggregate([
+        { $match: { "participants.userId": user.id } },
+        { $addFields: { isPast: { $lt: ["$date", now] } } },
+        { $sort: { isPast: 1, date: 1 } },
+      ])
+      .toArray();
+
+    return res.json({
+      events: events.map((event) => ({
+        ...serializeEvent(event, user.id),
+        isPast: event.isPast,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /*  GET /api/events/:id — public event details                                */
 /* -------------------------------------------------------------------------- */
 
