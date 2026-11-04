@@ -114,3 +114,6 @@ start().catch((error) => {
   console.error("Could not start the auth server:", error);
   process.exit(1);
 });
+
+
+export default app;

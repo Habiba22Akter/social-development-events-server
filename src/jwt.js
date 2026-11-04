@@ -1,6 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
-import { appUrl, port } from "./config.js";
+import { appUrl, internalApiUrl } from "./config.js";
 
 /**
  * JWT verification for the protected event API.
@@ -15,7 +15,7 @@ import { appUrl, port } from "./config.js";
  * token's `iss` / `aud` claims.
  */
 const JWKS = createRemoteJWKSet(
-  new URL("/api/auth/jwks", `http://127.0.0.1:${port}`),
+  new URL("/api/auth/jwks", internalApiUrl),
   {
     cacheMaxAge: 10 * 60 * 1000,
     timeoutDuration: 5000,

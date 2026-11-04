@@ -1,13 +1,22 @@
 const trimSlash = (value) => value.replace(/\/+$/, "");
 
 /** The public URL of the Next.js app. OAuth callbacks and cookies use this. */
-export const appUrl = trimSlash(
-  process.env.BETTER_AUTH_URL ||
-    process.env.CLIENT_URL ||
-    "http://localhost:3000",
-);
+const configuredAppUrl = process.env.BETTER_AUTH_URL || process.env.CLIENT_URL;
+
+if (!configuredAppUrl) {
+  throw new Error("BETTER_AUTH_URL or CLIENT_URL must be configured.");
+}
+
+export const appUrl = trimSlash(configuredAppUrl);
 
 export const port = Number(process.env.PORT || 8000);
+const configuredInternalApiUrl = process.env.INTERNAL_API_URL;
+
+if (!configuredInternalApiUrl) {
+  throw new Error("INTERNAL_API_URL must be configured.");
+}
+
+export const internalApiUrl = trimSlash(configuredInternalApiUrl);
 
 /**
  * Origins allowed to call this server directly (browser -> Express).
@@ -18,8 +27,6 @@ export const trustedOrigins = [
   ...new Set(
     [
       appUrl,
-      "http://localhost:3000",
-      "http://127.0.0.1:3000",
       ...(process.env.CORS_ORIGINS || "")
         .split(",")
         .map((origin) => origin.trim())
