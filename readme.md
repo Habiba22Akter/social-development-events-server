@@ -1,8 +1,9 @@
-# Utsho auth server
+# Utsho API server
 
-Express + BetterAuth + MongoDB. This server owns authentication for the Utsho
-Next.js app. The Next app proxies `/api/auth/*` here, so the browser keeps its
-session cookie on the Next.js domain.
+Express + BetterAuth + MongoDB. This server owns authentication and the events
+API for the Utsho Next.js app. The Next app proxies `/api/auth/*` and
+`/api/events/*` here, so the browser keeps its session cookie on the Next.js
+domain.
 
 ## Setup
 
@@ -47,6 +48,10 @@ GitHub works the same way with `/api/auth/callback/github`; add `github` to
 - `GET /` — server status
 - `GET /health` — database ping
 - `ALL /api/auth/*` — BetterAuth handler (sign up, sign in, session, OAuth…)
+- `GET /api/events?limit=6` — upcoming events (public, sorted by date)
+- `GET /api/events/:id` — one upcoming event (public, includes `joinedByViewer`)
+- `POST /api/events` — create an event (session required)
+- `POST /api/events/:id/join` — join an event (session required, idempotent)
 
 ## Password rule
 

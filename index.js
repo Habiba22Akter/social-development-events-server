@@ -6,6 +6,7 @@ import { toNodeHandler } from "better-auth/node";
 import { auth, enabledSocialProviders } from "./src/auth.js";
 import { appUrl, port, trustedOrigins } from "./src/config.js";
 import { connectToDatabase, db } from "./src/db.js";
+import { eventsRouter } from "./src/events.js";
 
 const app = express();
 
@@ -51,15 +52,22 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 /* -------------------------------------------------------------------------- */
+/*  Events API                                                                */
+/* -------------------------------------------------------------------------- */
+
+app.use("/api/events", eventsRouter);
+
+/* -------------------------------------------------------------------------- */
 /*  Public endpoints                                                          */
 /* -------------------------------------------------------------------------- */
 
 app.get("/", (req, res) => {
   res.json({
-    name: "Utsho auth server",
+    name: "Utsho API server",
     status: "ok",
     client: appUrl,
     authEndpoint: "/api/auth/*",
+    eventsEndpoint: "/api/events",
     socialProviders: enabledSocialProviders,
   });
 });
@@ -94,7 +102,7 @@ async function start() {
   await connectToDatabase();
 
   app.listen(port, () => {
-    console.log(`Auth server running on http://localhost:${port}`);
+    console.log(`API server running on http://localhost:${port}`);
     console.log(`Allowed origins: ${trustedOrigins.join(", ")}`);
     console.log(
       `Social providers: ${enabledSocialProviders.length ? enabledSocialProviders.join(", ") : "none configured"}`,
